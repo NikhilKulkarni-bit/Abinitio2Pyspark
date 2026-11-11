@@ -4,3 +4,4 @@ truststore
 pandas
 openpyxl
 tabulate
+urllib3

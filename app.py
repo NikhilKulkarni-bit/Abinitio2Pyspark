@@ -4,6 +4,9 @@ import time
 import requests  
 import pandas as pd  
 import streamlit as st  
+import urllib3  
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
   
 DEVIN_API_BASE = "https://api.devin.ai/v1"  
   
@@ -23,7 +26,9 @@ def upload_attachment(api_key: str, filename: str, content: bytes) -> str:
     )  
     resp.raise_for_status()  
     data = resp.json()  
-    return data.get("url") or data.get("attachment_url")  
+    if isinstance(data, str):  
+        return data  
+    return data.get("url") or data.get("attachment_url") 
   
   
 def create_session(api_key: str, prompt: str) -> dict:  
@@ -175,7 +180,7 @@ if metadata_file:
         xls = pd.ExcelFile(io.BytesIO(metadata_file.getvalue()))  
         for sheet in xls.sheet_names:  
             with st.expander(f"Sheet: {sheet}"):  
-                st.dataframe(xls.parse(sheet))  
+                st.dataframe(pd.read_excel(xls, sheet_name=sheet))
     except Exception as e:  
         st.error(f"Could not parse Excel file: {e}")  
         metadata_text = None  
