@@ -1,7 +1,4 @@
 requests
 streamlit
 truststore
-pandas
-openpyxl
-tabulate
 urllib3

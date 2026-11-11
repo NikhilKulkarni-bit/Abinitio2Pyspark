@@ -1,12 +1,10 @@
 # app.py  
-import io  
 import time  
 import requests  
-import pandas as pd  
-import streamlit as st  
 import urllib3  
-
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+import streamlit as st  
+  
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)  
   
 DEVIN_API_BASE = "https://api.devin.ai/v1"  
   
@@ -26,9 +24,10 @@ def upload_attachment(api_key: str, filename: str, content: bytes) -> str:
     )  
     resp.raise_for_status()  
     data = resp.json()  
+    # API may return the URL as a bare string or inside an object  
     if isinstance(data, str):  
         return data  
-    return data.get("url") or data.get("attachment_url") 
+    return data.get("url") or data.get("attachment_url")  
   
   
 def create_session(api_key: str, prompt: str) -> dict:  
@@ -56,36 +55,22 @@ def get_session(api_key: str, session_id: str) -> dict:
     return resp.json()  
   
   
-def excel_to_text(file_bytes: bytes) -> str:  
-    """Convert every sheet of the metadata Excel into readable text for the prompt."""  
-    xls = pd.ExcelFile(io.BytesIO(file_bytes))  
-    parts = []  
-    for sheet in xls.sheet_names:  
-        df = xls.parse(sheet)  
-        parts.append(f"### Sheet: {sheet}\n{df.to_markdown(index=False)}")  
-    return "\n\n".join(parts)  
-  
-  
-def build_prompt(attachment_urls: list[str], metadata_text: str | None) -> str:  
-    metadata_section = ""  
-    if metadata_text:  
-        metadata_section = f"""  
-The following metadata describes the Ab Initio graph(s) — components, connections,  
-record formats, parameters, and data flow. Use it as the authoritative description  
-of the graph structure when generating the PySpark code:  
-  
-{metadata_text}  
+def build_prompt(attachment_urls: list[str], has_metadata: bool) -> str:  
+    metadata_note = ""  
+    if has_metadata:  
+        metadata_note = """  
+One of the attachments is an Excel metadata file describing the Ab Initio  
+graph(s) — components, connections, record formats, parameters, and data flow.  
+Read and parse it, and use it as the authoritative description of the graph  
+structure when generating the PySpark code.  
 """  
   
-    files_section = ""  
-    if attachment_urls:  
-        files_section = f"""  
-Attached Ab Initio source files:  
+    return f"""Convert the Ab Initio graph(s) described in the attached file(s)  
+into equivalent PySpark code.  
+{metadata_note}  
+Attached files:  
 {chr(10).join(f'- {u}' for u in attachment_urls)}  
-"""  
   
-    return f"""Convert the Ab Initio graph(s) described below into equivalent PySpark code.  
-{metadata_section}{files_section}  
 Requirements:  
 - Each Ab Initio graph maps to one standalone PySpark job.  
 - Parse DML record formats into PySpark StructTypes.  
@@ -127,7 +112,6 @@ def extract_usage(detail: dict) -> dict:
     ):  
         if detail.get(key) is not None:  
             usage[key] = detail[key]  
-    # Some API versions nest usage inside structured_output or a metrics object  
     for parent in ("structured_output", "metrics", "usage_details"):  
         sub = detail.get(parent)  
         if isinstance(sub, dict):  
@@ -172,25 +156,18 @@ if uploaded:
         with st.expander(f.name):  
             st.code(f.getvalue().decode("utf-8", errors="replace"), language="bash")  
   
-metadata_text = None  
 if metadata_file:  
-    st.subheader("Metadata preview")  
-    try:  
-        metadata_text = excel_to_text(metadata_file.getvalue())  
-        xls = pd.ExcelFile(io.BytesIO(metadata_file.getvalue()))  
-        for sheet in xls.sheet_names:  
-            with st.expander(f"Sheet: {sheet}"):  
-                st.dataframe(pd.read_excel(xls, sheet_name=sheet))
-    except Exception as e:  
-        st.error(f"Could not parse Excel file: {e}")  
-        metadata_text = None  
+    st.info(f"Metadata file attached: `{metadata_file.name}` "  
+            f"({metadata_file.size / 1024:.1f} KB) — sent to Devin as an attachment.")  
   
-has_input = bool(uploaded) or bool(metadata_text)  
+has_input = bool(uploaded) or bool(metadata_file)  
 run = st.button("Run Conversion", disabled=not has_input or not api_key)  
   
 if run:  
     with st.status("Preparing Devin session...") as status:  
         attachment_urls = []  
+  
+        # Upload Ab Initio source files  
         for f in uploaded or []:  
             try:  
                 url = upload_attachment(api_key, f.name, f.getvalue())  
@@ -198,23 +175,24 @@ if run:
                 st.write(f"Uploaded `{f.name}`")  
             except requests.HTTPError as e:  
                 status.update(label="Upload failed", state="error")  
-                st.error(f"Failed to upload {f.name}: {e.response.status_code} {e.response.text[:500]}")  
+                st.error(f"Failed to upload {f.name}: "  
+                         f"{e.response.status_code} {e.response.text[:500]}")  
                 st.stop()  
   
-        # Also attach the raw Excel so Devin can re-parse it if needed  
+        # Upload the metadata Excel as an attachment  
         if metadata_file:  
             try:  
-                url = upload_attachment(api_key, metadata_file.name, metadata_file.getvalue())  
+                url = upload_attachment(api_key, metadata_file.name,  
+                                        metadata_file.getvalue())  
                 attachment_urls.append(url)  
                 st.write(f"Uploaded `{metadata_file.name}`")  
             except requests.HTTPError as e:  
-                st.warning(f"Excel attachment upload failed (continuing with parsed text): {e}")  
+                status.update(label="Upload failed", state="error")  
+                st.error(f"Failed to upload {metadata_file.name}: "  
+                         f"{e.response.status_code} {e.response.text[:500]}")  
+                st.stop()  
   
-        prompt = build_prompt(attachment_urls, metadata_text)  
-        if len(prompt) > 29000:  
-            status.update(label="Prompt too long", state="error")  
-            st.error(f"Prompt is {len(prompt):,} chars — exceeds Devin's 30k limit. Reduce metadata or files.")  
-            st.stop()  
+        prompt = build_prompt(attachment_urls, has_metadata=bool(metadata_file))  
   
         status.update(label="Creating Devin session...")  
         session = create_session(api_key, prompt)  
