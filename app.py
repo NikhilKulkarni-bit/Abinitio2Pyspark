@@ -3,6 +3,7 @@ import time
 import requests  
 import urllib3  
 import streamlit as st  
+import pandas as pd
   
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)  
   
