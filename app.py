@@ -250,12 +250,13 @@ run = st.button("Run Conversion", disabled=not has_input or not api_key)
 if run:  
     with st.status("Preparing Devin session...") as status:  
         attachment_urls = []  
-  
+        attachment_payloads = []  # (filename, size_bytes) 
         # Upload Ab Initio source files  
         for f in uploaded or []:  
             try:  
                 url = upload_attachment(api_key, f.name, f.getvalue())  
                 attachment_urls.append(url)  
+                attachment_payloads.append((f.name, f.size))  
                 st.write(f"Uploaded `{f.name}`")  
             except requests.HTTPError as e:  
                 status.update(label="Upload failed", state="error")  
@@ -269,6 +270,7 @@ if run:
                 url = upload_attachment(api_key, metadata_file.name,  
                                         metadata_file.getvalue())  
                 attachment_urls.append(url)  
+                attachment_payloads.append((metadata_file.name, metadata_file.size)) 
                 st.write(f"Uploaded `{metadata_file.name}`")  
             except requests.HTTPError as e:  
                 status.update(label="Upload failed", state="error")  
