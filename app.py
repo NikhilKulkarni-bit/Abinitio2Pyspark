@@ -94,14 +94,53 @@ IMPORTANT: Do NOT create a repository, branch, or pull request. Return the
 complete converted PySpark code directly in your final message, with each file  
 in its own code block labeled with a suggested filename (e.g., job_name.py).  
   
+In your final message, BEFORE the code blocks, include a section titled  
+"## Component Inventory" containing a markdown table listing every input,  
+output, and lookup in the graph(s). Use EXACTLY this format:  
+  
+## Component Inventory  
+  
+| Component Name | Category | Path / Table | Description |  
+|---|---|---|---|  
+| example_input | Input | /data/in/example.dat | Source feed |  
+| example_lookup | Lookup | /data/lookups/ref.dat | Reference data |  
+| example_output | Output | /data/out/result.dat | Target file |  
+  
+Rules for the table:  
+- Category must be exactly one of: Input, Output, Lookup  
+- Path / Table = the file path, dataset, or database table the component  
+  reads/writes (use the value from the graph or metadata; write "unknown"  
+  if not specified)  
+- List EVERY input, output, and lookup component across all attached graphs —  
+  do not omit any  
+- Do not include transform components (reformat, join, rollup, etc.) in this  
+  table  
+  
 At the end of your final message, include a "Session Metadata" section with:  
 - The model name/version you are running on  
 - The number of tokens consumed to complete this request (input + output),  
   if available to you  
 - A brief summary of each converted component and any assumptions or  
   ambiguities you encountered  
-"""  
-  
+"""
+
+def parse_component_inventory(message: str) -> pd.DataFrame | None:  
+    """Extract the Component Inventory markdown table from Devin's message."""  
+    import re  
+    match = re.search(  
+        r"##\s*Component Inventory\s*\n((?:\|.*\|\n?)+)", message, re.IGNORECASE  
+    )  
+    if not match:  
+        return None  
+    rows = [  
+        [c.strip() for c in line.strip().strip("|").split("|")]  
+        for line in match.group(1).strip().splitlines()  
+        if line.strip().startswith("|")  
+    ]  
+    if len(rows) < 2:  
+        return None  
+    header, data = rows[0], [r for r in rows[1:] if not set("".join(r)) <= {"-", " ", ":"}]  
+    return pd.DataFrame(data, columns=header)
   
 def extract_usage(detail: dict) -> dict:  
     """Pull model/token usage fields from the session response, whatever keys exist."""  
@@ -120,6 +159,51 @@ def extract_usage(detail: dict) -> dict:
                 if sub.get(key) is not None:  
                     usage[f"{parent}.{key}"] = sub[key]  
     return usage  
+
+def extract_insights(detail: dict) -> dict:  
+    """Collect ACU, model, and usage fields from the session response."""  
+    insights = {}  
+  
+    # Top-level fields commonly present in session detail  
+    for key in (  
+        "acu_consumed", "acu_used", "acu",  
+        "model", "model_name", "llm_model",  
+        "token_usage", "tokens_used",  
+        "created_at", "updated_at",  
+    ):  
+        if detail.get(key) is not None:  
+            insights[key] = detail[key]  
+  
+    # Nested objects that may carry usage/metrics  
+    for parent in ("structured_output", "metrics", "usage", "usage_details",  
+                   "billing", "consumption"):  
+        sub = detail.get(parent)  
+        if isinstance(sub, dict):  
+            for key, val in sub.items():  
+                if any(t in key.lower() for t in  
+                       ("acu", "token", "model", "cost", "usage")):  
+                    insights[f"{parent}.{key}"] = val  
+  
+    return insights  
+  
+  
+def session_size_info(prompt: str, attachment_payloads: list[tuple[str, int]],  
+                      detail: dict) -> dict:  
+    """Compute sizes of what was sent to / received from Devin."""  
+    info = {  
+        "Prompt size (chars)": len(prompt),  
+        "Prompt size (KB)": round(len(prompt.encode("utf-8")) / 1024, 1),  
+        "Attachments sent": len(attachment_payloads),  
+        "Attachments total (KB)": round(sum(s for _, s in attachment_payloads) / 1024, 1),  
+        "Messages in session": len(detail.get("messages", [])),  
+    }  
+    # Total size of all message text returned by the session  
+    msg_bytes = sum(  
+        len(str(m.get("message", "")).encode("utf-8"))  
+        for m in detail.get("messages", [])  
+    )  
+    info["Session messages size (KB)"] = round(msg_bytes / 1024, 1)  
+    return info
   
   
 st.set_page_config(page_title="Ab Initio → PySpark", layout="wide")  
@@ -213,15 +297,22 @@ if run:
     st.subheader("Result")  
     st.write(f"Final status: `{state}`")  
   
-    # --- LLM model & token usage ---  
-    usage = extract_usage(detail)  
-    if usage:  
-        st.subheader("LLM Usage")  
-        cols = st.columns(min(len(usage), 4))  
-        for i, (k, v) in enumerate(usage.items()):  
+  
+    # --- Session insights ---  
+    st.subheader("Session Insights")  
+  
+    insights = extract_insights(detail)  
+    sizes = session_size_info(prompt, attachment_payloads, detail)  
+  
+    if insights:  
+        cols = st.columns(min(len(insights), 4))  
+        for i, (k, v) in enumerate(insights.items()):  
             cols[i % len(cols)].metric(k, v)  
     else:  
-        st.caption("No usage fields found in session response — check raw response below.")  
+        st.caption("No ACU/model fields found — check raw response below.")  
+  
+    st.markdown("**Size information**")  
+    st.table(pd.DataFrame(sizes.items(), columns=["Metric", "Value"])) 
   
     structured = detail.get("structured_output") or {}  
     if structured.get("pr_url"):  
@@ -230,8 +321,19 @@ if run:
     messages = detail.get("messages", [])  
     devin_msgs = [m for m in messages if m.get("type") == "devin_message"]  
     if devin_msgs:  
+        last_msg = devin_msgs[-1].get("message", "")  
+  
+        inventory = parse_component_inventory(last_msg)  
+        if inventory is not None:  
+            st.subheader("Component Inventory")  
+            for category in ("Input", "Output", "Lookup"):  
+                subset = inventory[inventory["Category"].str.lower() == category.lower()]  
+                if not subset.empty:  
+                    st.markdown(f"**{category}s** ({len(subset)})")  
+                    st.dataframe(subset, use_container_width=True)  
+  
         st.markdown("**Devin's final message:**")  
-        st.markdown(devin_msgs[-1].get("message", ""))  
+        st.markdown(last_msg)  
   
     with st.expander("Raw session response"):  
         st.json({k: v for k, v in detail.items() if k != "messages"})
